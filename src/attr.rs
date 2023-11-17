@@ -22,6 +22,7 @@ pub(crate) struct InstrumentArgs {
     pub(crate) parent: Option<Expr>,
     pub(crate) follows_from: Option<Expr>,
     pub(crate) skips: HashSet<Ident>,
+    pub(crate) skip_all: bool,
     pub(crate) fields: Option<Fields>,
     pub(crate) err_args: Option<EventArgs>,
     pub(crate) ret_args: Option<EventArgs>,
@@ -117,8 +118,20 @@ impl Parse for InstrumentArgs {
                 if !args.skips.is_empty() {
                     return Err(input.error("expected only a single `skip` argument"));
                 }
+                if args.skip_all {
+                    return Err(input.error("expected either `skip` or `skip_all` argument"));
+                }
                 let Skips(skips) = input.parse()?;
                 args.skips = skips;
+            } else if lookahead.peek(kw::skip_all) {
+                if args.skip_all {
+                    return Err(input.error("expected only a single `skip_all` argument"));
+                }
+                if !args.skips.is_empty() {
+                    return Err(input.error("expected either `skip` or `skip_all` argument"));
+                }
+                let _ = input.parse::<kw::skip_all>()?;
+                args.skip_all = true;
             } else if lookahead.peek(kw::fields) {
                 if args.fields.is_some() {
                     return Err(input.error("expected only a single `fields` argument"));
@@ -232,19 +245,6 @@ impl<T: Parse> Parse for ExprArg<T> {
     }
 }
 
-struct IdentOrSelf(Ident);
-impl Parse for IdentOrSelf {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        Ok(Self(
-            if let Ok(self_token) = input.parse::<Token![self]>() {
-                Ident::new("self", self_token.span)
-            } else {
-                input.parse()?
-            },
-        ))
-    }
-}
-
 struct Skips(HashSet<Ident>);
 
 impl Parse for Skips {
@@ -252,16 +252,16 @@ impl Parse for Skips {
         let _ = input.parse::<kw::skip>();
         let content;
         let _ = syn::parenthesized!(content in input);
-        let names: Punctuated<IdentOrSelf, Token![,]> = Punctuated::parse_terminated(&content)?;
+        let names = content.parse_terminated(Ident::parse_any, Token![,])?;
         let mut skips = HashSet::new();
         for name in names {
-            if skips.contains(&name.0) {
+            if skips.contains(&name) {
                 return Err(syn::Error::new(
-                    name.0.span(),
+                    name.span(),
                     "tried to skip the same field twice",
                 ));
             } else {
-                skips.insert(name.0);
+                skips.insert(name);
             }
         }
         Ok(Self(skips))
@@ -303,7 +303,7 @@ impl Parse for Fields {
         let _ = input.parse::<kw::fields>();
         let content;
         let _ = syn::parenthesized!(content in input);
-        let fields: Punctuated<_, Token![,]> = Punctuated::parse_terminated(&content)?;
+        let fields = content.parse_terminated(Field::parse, Token![,])?;
         Ok(Self(fields))
     }
 }
@@ -348,7 +348,7 @@ impl ToTokens for Field {
             let name = &self.name;
             let kind = &self.kind;
             tokens.extend(quote! {
-                #name = #kind#value
+                #name = #kind #value
             })
         } else if self.kind == FieldKind::Value {
             // XXX(eliza): I don't like that fields without values produce
@@ -446,6 +446,7 @@ impl ToTokens for Level {
 mod kw {
     syn::custom_keyword!(fields);
     syn::custom_keyword!(skip);
+    syn::custom_keyword!(skip_all);
     syn::custom_keyword!(level);
     syn::custom_keyword!(target);
     syn::custom_keyword!(parent);
